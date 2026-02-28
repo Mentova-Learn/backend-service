@@ -57,8 +57,6 @@ class AbstractContext(ABC):
     """An abstract context class defining the context required for service functions
     to be provided by context providers."""
 
-    _user: UserModel | None = None
-
     @property
     @abstractmethod
     def _mysql(self) -> ImplementsMySQL: ...
@@ -84,9 +82,14 @@ class AbstractContext(ABC):
         return self._minimax
 
     @property
-    def user(self) -> UserModel | None:
-        return self._user
-
-    @property
     def users(self) -> UserRepository:
         return UserRepository(self._mysql)
+
+
+class AbstractAuthContext(AbstractContext):
+    """An abstract context class for authenticated operations, providing
+    a non-optional user property."""
+
+    @property
+    @abstractmethod
+    def user(self) -> UserModel: ...

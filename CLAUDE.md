@@ -46,11 +46,16 @@ pre-commit run black --all-files
 class MyError(ServiceError):
     NOT_FOUND = "not_found"
 
-    def service(self) -> str: return "my_resource"
+    def service(self) -> str:
+        return "my_resource"
+
     def status_code(self) -> int:
         match self:
-            case MyError.NOT_FOUND: return 404
-            case _: return 500
+            case MyError.NOT_FOUND:
+                return 404
+            case _:
+                return 500
+
 
 async def get_thing(ctx: AbstractContext, id: int) -> MyError.OnSuccess[Thing]:
     thing = await ctx.things.find_by_id(id)

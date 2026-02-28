@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-from app.services._common import AbstractContext
-from app.services._common import ServiceError
-from app.services._common import is_error
-from app.services._common import is_success
-from app.resources.user import UserModel
-from app.resources.user import UserRepository
+from typing import override
 
 from fastapi import status
 
-from typing import override
+from app.services._common import ServiceError
 
 
 class UsersServiceError(ServiceError):

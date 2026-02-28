@@ -26,6 +26,7 @@ from app.adapters.mysql import MySQLPoolAdapter
 from app.adapters.redis import RedisClient
 from app.resources import UserModel
 from app.resources import UserRepository
+from app.services import AbstractAuthContext
 from app.services import AbstractContext
 from app.utilities import tokens
 
@@ -111,15 +112,20 @@ async def _get_transaction_context(
         )
 
 
-class HTTPAuthContext(HTTPContext):
+class HTTPAuthContext(HTTPContext, AbstractAuthContext):
     """Context for authenticated read-only operations."""
 
     def __init__(self, request: Request, user: UserModel) -> None:
         super().__init__(request)
-        self._user = user
+        self._user_model = user
+
+    @property
+    @override
+    def user(self) -> UserModel:
+        return self._user_model
 
 
-class HTTPAuthTransactionContext(HTTPTransactionContext):
+class HTTPAuthTransactionContext(HTTPTransactionContext, AbstractAuthContext):
     """Context for authenticated write operations with a transaction."""
 
     def __init__(
@@ -131,7 +137,12 @@ class HTTPAuthTransactionContext(HTTPTransactionContext):
         user: UserModel,
     ) -> None:
         super().__init__(mysql, redis, aws, minimax)
-        self._user = user
+        self._user_model = user
+
+    @property
+    @override
+    def user(self) -> UserModel:
+        return self._user_model
 
 
 async def _get_authenticated_user(request: Request) -> UserModel:

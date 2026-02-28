@@ -5,6 +5,7 @@ from fastapi import Response
 from pydantic import BaseModel
 
 from app.api.v1 import response
+from app.api.v1.context import RequiresAuth
 from app.api.v1.context import RequiresContext
 from app.api.v1.context import RequiresTransaction
 from app.services import auth
@@ -37,8 +38,23 @@ class TokenResponse(BaseModel):
     access_token: str
 
 
+type MeResponse = response.BaseResponse[UserResponse]
 type RegisterResponse = response.BaseResponse[UserResponse]
 type LoginResponse = response.BaseResponse[TokenResponse]
+
+
+@router.get("/@me", response_model=MeResponse)
+async def me(
+    ctx: RequiresAuth,
+) -> Response:
+    return response.create(
+        UserResponse(
+            id=ctx.user.id,
+            username=ctx.user.username,
+            full_name=ctx.user.full_name,
+            email=ctx.user.email,
+        ),
+    )
 
 
 @router.post("/register", response_model=RegisterResponse)
