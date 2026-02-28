@@ -617,7 +617,7 @@ async def _generate_material_type(
                         {"role": "user", "content": user_msg},
                     ],
                     temperature=0.7,
-                    max_tokens=16384,
+                    max_completion_tokens=16384,
                 )
             elapsed = round(_time.monotonic() - t1, 2)
             usage = completion.usage
@@ -773,10 +773,10 @@ async def generate_course(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.7,
-            max_tokens=16384,
+            max_completion_tokens=16384,
         )
-    except Exception:
-        logger.exception("Phase 1 LLM API call failed")
+    except Exception as exc:
+        logger.exception("Phase 1 LLM API call failed", extra={"error": str(exc)})
         return CourseError.GENERATION_FAILED
 
     elapsed = round(_time.monotonic() - t0, 2)
@@ -1013,7 +1013,7 @@ async def explain_wrong_answer(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.7,
-            max_tokens=512,
+            max_completion_tokens=512,
         )
     except Exception:
         logger.exception("Explanation LLM call failed")
@@ -1092,7 +1092,7 @@ async def extend_course(
                     {"role": "user", "content": user_msg},
                 ],
                 temperature=0.7,
-                max_tokens=4096,
+                max_completion_tokens=4096,
             )
         except Exception:
             logger.exception(
@@ -1390,7 +1390,7 @@ async def suggest_tracks(
                 {"role": "user", "content": user_msg},
             ],
             temperature=0.7,
-            max_tokens=2048,
+            max_completion_tokens=2048,
         )
     except Exception:
         logger.exception("Track suggestion LLM call failed")
@@ -1520,7 +1520,7 @@ async def _check_and_generate_ahead(
                     {"role": "user", "content": user_msg},
                 ],
                 temperature=0.7,
-                max_tokens=8192,
+                max_completion_tokens=8192,
             )
         except Exception:
             logger.exception("Lazy generation LLM call failed")
