@@ -73,25 +73,19 @@ const LEVELS: { id: CourseDifficulty; label: string; description: string }[] =
   ];
 
 const TOPIC_SUGGESTIONS = [
-  "Mathematics",
-  "Science",
-  "History",
-  "Art",
-  "Music",
-  "Computer Science",
-  "Languages",
-  "Geography",
-  "English",
+  "Introduction to AI",
+  "Database Management System",
+  "Software Engineering",
+  "The Happiness of Pursuit",
+  "How should I learn to code?",
+  "How to build a startup",
+  "Introduction to Quantum Computing",
 ];
 
 const GENERATION_PHASES = [
   "Analysing your topic...",
   "Designing course structure...",
   "Writing lectures...",
-  "Generating flashcards...",
-  "Creating quizzes...",
-  "Building exercises...",
-  "Finalising your course...",
 ];
 
 const STEPS = [
@@ -327,12 +321,11 @@ function StepGenerate({
           <div className="h-20 w-20 rounded-full bg-primary/10 flex items-center justify-center">
             <IconBrain className="size-9 text-primary" />
           </div>
-          <div className="absolute -inset-3 rounded-full border-2 border-primary/20 border-t-primary animate-spin" />
         </div>
-        <h3 className="text-base font-semibold">Generating your course...</h3>
+        <h3 className="text-base font-semibold">Building your course...</h3>
         <p className="text-sm text-muted-foreground text-center max-w-xs">
-          AI agents are crafting lessons, quizzes, and flashcards tailored just
-          for you. This usually takes 20–40 seconds.
+          AI is designing your course structure and lectures. You&apos;ll be
+          taken there as soon as it&apos;s ready.
         </p>
         <div className="flex items-center gap-2 text-sm text-primary">
           <IconLoader2 className="size-4 animate-spin shrink-0" />

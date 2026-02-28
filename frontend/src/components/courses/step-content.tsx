@@ -160,6 +160,7 @@ export function StepContent({
       return (
         <SpotlightViewer
           data={section.material as SpotlightData}
+          isCompleted={step.is_completed}
           onComplete={onComplete}
         />
       );

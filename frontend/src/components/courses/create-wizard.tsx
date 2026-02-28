@@ -13,15 +13,6 @@ import {
   Loader2,
   Brain,
   Layers,
-  CreditCard,
-  HelpCircle,
-  PenTool,
-  CheckCircle,
-  Link2,
-  ArrowUpDown,
-  Scale,
-  FileText,
-  FolderTree,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,16 +32,6 @@ const GENERATION_PHASES = [
   { icon: Brain, text: "Analysing your topic..." },
   { icon: Layers, text: "Designing course structure..." },
   { icon: BookOpen, text: "Writing lectures..." },
-  { icon: Sparkles, text: "Adding fun facts and tips..." },
-  { icon: CreditCard, text: "Generating flashcards..." },
-  { icon: Link2, text: "Creating matching exercises..." },
-  { icon: HelpCircle, text: "Creating quizzes..." },
-  { icon: ArrowUpDown, text: "Building ordering challenges..." },
-  { icon: Scale, text: "Writing true/false statements..." },
-  { icon: FileText, text: "Crafting case studies..." },
-  { icon: FolderTree, text: "Designing sorting activities..." },
-  { icon: PenTool, text: "Building exercises..." },
-  { icon: CheckCircle, text: "Finalising your course..." },
 ];
 
 const DIFFICULTY_OPTIONS = [
@@ -332,7 +313,7 @@ export function CreateWizard() {
             </h3>
             <p className="text-sm text-gray-500 text-center max-w-sm">
               Our AI agents are crafting lessons, quizzes, and flashcards
-              tailored just for you. This usually takes 20–40 seconds.
+              tailored just for you. This usually takes a few minutes.
             </p>
             <div className="flex items-center gap-2 text-sm text-primary-foreground transition-all duration-500">
               <Loader2 className="h-4 w-4 animate-spin" />

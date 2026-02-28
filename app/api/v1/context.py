@@ -22,6 +22,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.security import HTTPBearer
 
 from app.adapters.aws import AWSSessionAdapter
+from app.adapters.exa import ExaClientAdapter
 from app.adapters.mongodb import ImplementsMongoDB
 from app.adapters.mongodb import MongoDBClientAdapter
 from app.adapters.openai import OpenAIClientAdapter
@@ -63,6 +64,11 @@ class HTTPContext(AbstractContext):
 
     @property
     @override
+    def _exa(self) -> ExaClientAdapter | None:
+        return self.request.app.state.exa
+
+    @property
+    @override
     def _storage(self) -> StorageAdapter:
         return self.request.app.state.storage
 
@@ -87,13 +93,21 @@ async def _get_authenticated_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> UserModel:
-    if credentials is None:
+    # Support token as a query parameter for EventSource (SSE) clients that
+    # cannot set custom headers.
+    raw_token: str | None = None
+    if credentials is not None:
+        raw_token = credentials.credentials
+    else:
+        raw_token = request.query_params.get("token")
+
+    if raw_token is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing or invalid authorization header",
         )
 
-    user_id = tokens.decode_access_token(credentials.credentials)
+    user_id = tokens.decode_access_token(raw_token)
     if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

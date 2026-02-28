@@ -13,6 +13,7 @@ from starlette.responses import Response
 
 from app import settings
 from app.adapters import aws
+from app.adapters import exa
 from app.adapters import mongodb
 from app.adapters import openai
 from app.adapters import redis
@@ -31,6 +32,7 @@ def create_app() -> FastAPI:
     initialise_cors(app)
     initialise_aws(app)
     initialise_openai(app)
+    initialise_exa(app)
     initialise_storage(app)
     initialise_mongodb(app)
     initialise_redis(app)
@@ -70,6 +72,14 @@ def initialise_aws(app: FastAPI) -> None:
 def initialise_openai(app: FastAPI) -> None:
     app.state.openai = openai.default()
     logger.debug("Attached OpenAI to the app instance.")
+
+
+def initialise_exa(app: FastAPI) -> None:
+    app.state.exa = exa.default()
+    if app.state.exa is not None:
+        logger.debug("Attached Exa search to the app instance.")
+    else:
+        logger.debug("Exa search not configured (EXA_API_KEY absent).")
 
 
 def initialise_storage(app: FastAPI) -> None:

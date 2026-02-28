@@ -54,6 +54,12 @@ class CoursePublicity(StrEnum):
     PRIVATE = "private"
 
 
+class CourseGenerationStatus(StrEnum):
+    GENERATING = "generating"
+    READY = "ready"
+    FAILED = "failed"
+
+
 # Actual course data itself.
 class CourseModel(BaseModel):
     id: str
@@ -69,6 +75,7 @@ class CourseModel(BaseModel):
     preview_url: str | None
     basis_materials: list[BasisMaterialModel]
     publicity: CoursePublicity
+    status: CourseGenerationStatus
     created_at: datetime
 
 
@@ -250,6 +257,7 @@ def _to_course_model(document: dict[str, Any]) -> CourseModel:
             BasisMaterialModel(**m) for m in document.get("basis_materials", [])
         ],
         publicity=document["publicity"],
+        status=document.get("status", CourseGenerationStatus.READY),
         created_at=document["created_at"],
     )
 
@@ -342,6 +350,7 @@ class CourseRepository:
         basis_materials: list[BasisMaterialModel],
         publicity: CoursePublicity,
         colour: str = "#6366f1",
+        status: CourseGenerationStatus = CourseGenerationStatus.READY,
     ) -> CourseModel:
         now = datetime.now()
         document: dict[str, Any] = {
@@ -356,6 +365,7 @@ class CourseRepository:
             "preview_url": preview_url,
             "basis_materials": [m.model_dump() for m in basis_materials],
             "publicity": publicity.value,
+            "status": status.value,
             "created_at": now,
         }
         result = await self._mongodb.collection("courses").insert_one(document)
@@ -372,8 +382,16 @@ class CourseRepository:
             preview_url=preview_url,
             basis_materials=basis_materials,
             publicity=publicity,
+            status=status,
             created_at=now,
         )
+
+    async def update_status(self, id: str, status: CourseGenerationStatus) -> bool:
+        result = await self._mongodb.collection("courses").update_one(
+            {"_id": ObjectId(id)},
+            {"$set": {"status": status.value}},
+        )
+        return result.modified_count > 0
 
     async def find_by_id(self, id: str) -> CourseModel | None:
         document = await self._mongodb.collection("courses").find_one(

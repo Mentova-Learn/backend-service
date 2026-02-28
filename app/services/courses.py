@@ -1,19 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import time as _time
 from typing import override
 
 from fastapi import status
 
 from app import settings
-import asyncio
 
 from app.resources.course import JOURNEY_STEP_ORDER
 from app.resources.course import CaseStudyModel
 from app.resources.course import CaseStudyQuestionModel
 from app.resources.course import CourseAssignRelationship
 from app.resources.course import CourseDifficulty
+from app.resources.course import CourseGenerationStatus
 from app.resources.course import CourseMaterialModel
 from app.resources.course import CourseMaterialType
 from app.resources.course import CourseModel
@@ -75,338 +77,509 @@ class CourseError(ServiceError):
                 return status.HTTP_500_INTERNAL_SERVER_ERROR
 
 
-_PHASE1_SYSTEM_PROMPT = """You are a course content generator. You create educational course materials in structured JSON format.
+_PHASE1_SYSTEM_PROMPT = """You are a course content generator. Create educational course materials.
 
-You MUST respond with ONLY valid JSON, no markdown fences, no explanation text. Just the raw JSON object.
-
-Generate the course metadata and detailed lecture content. Choose 5-8 subtopics for the course. These subtopics will be reused across all material types.
-
-The JSON must follow this exact structure:
-{
-  "name": "Course Name",
-  "description": "A 1-2 sentence course description",
-  "colour": "#hex",
-  "estimated_hours": 3,
-  "tags": ["tag1", "tag2", "tag3"],
-  "subtopics": ["Subtopic A", "Subtopic B", "Subtopic C", "Subtopic D", "Subtopic E"],
-  "lecture": {
-    "title": "Course Lectures",
-    "description": "In-depth explanations and teaching material",
-    "sections": [
-      {
-        "title": "Subtopic A",
-        "content": "## Subtopic A\\n\\nDetailed markdown lecture content..."
-      }
-    ]
-  }
-}
+Generate 5-8 subtopics and a detailed lecture for each one.
 
 Rules:
-- Pick a visually appealing hex colour that represents the course topic (avoid purple/violet)
-- Generate 5-8 subtopics — list them all in the "subtopics" array
-- Create a lecture section for EACH subtopic
-- Lectures should use rich markdown: headers, **bold**, *italics*, bullet lists, numbered lists, code blocks where appropriate
-- Write detailed, thorough lectures — vary length naturally (short for simple concepts, long for complex ones)
-- Each lecture should teach the subtopic fully with examples, analogies, and key takeaways
+- Pick a visually appealing hex colour representing the topic (avoid purple/violet)
+- Create one lecture section per subtopic with rich markdown content
+- Lectures should use headers, **bold**, *italics*, bullet lists, numbered lists, and code blocks where appropriate
+- Write detailed, thorough lectures with examples, analogies, and key takeaways
 - Content should match the requested difficulty level
-- estimated_hours should be reasonable (1-20)
-- Tags should be relevant keywords (3-6 tags)"""
+- Estimate hours realistically (1-20 hours total)
+- Include 3-6 relevant tag keywords"""
 
-
-_MATERIAL_GENERATION_PROMPTS: dict[str, str] = {
-    "flashcards": """You are a flashcard generator for an educational course. You MUST respond with ONLY valid JSON, no markdown fences. Just the raw JSON object.
-
-Generate flashcards for the given subtopics. Create AS MANY flashcards as you can for each subtopic — the minimum is 15 per subtopic, but generate more if you can. Cover every important concept, term, fact, and relationship.
-
-Output format:
-{
-  "title": "Key Concepts Flashcards",
-  "description": "Essential terms and concepts to remember",
-  "sections": [
-    {
-      "title": "Subtopic Name",
-      "flashcards": [
-        {"question": "What is X?", "answer": "X is..."},
-        {"question": "Define Y", "answer": "Y means..."}
-      ]
-    }
-  ]
+_PHASE1_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "submit_course",
+        "description": "Submit the generated course metadata and lecture content",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "colour": {"type": "string"},
+                "estimated_hours": {"type": "integer"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "subtopics": {"type": "array", "items": {"type": "string"}},
+                "lecture": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "description": {"type": "string"},
+                        "sections": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "title": {"type": "string"},
+                                    "content": {"type": "string"},
+                                },
+                                "required": ["title", "content"],
+                            },
+                        },
+                    },
+                    "required": ["title", "description", "sections"],
+                },
+            },
+            "required": [
+                "name",
+                "description",
+                "colour",
+                "estimated_hours",
+                "tags",
+                "subtopics",
+                "lecture",
+            ],
+        },
+    },
 }
 
+# ── Shared item schemas used across material tool definitions ─────────────────
+
+_ANSWER_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "answer": {"type": "string"},
+        "is_correct": {"type": "boolean"},
+    },
+    "required": ["answer", "is_correct"],
+}
+
+_QUIZ_QUESTION_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "question": {"type": "string"},
+        "answers": {"type": "array", "items": _ANSWER_SCHEMA},
+    },
+    "required": ["question", "answers"],
+}
+
+_FLASHCARD_ITEM_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "question": {"type": "string"},
+        "answer": {"type": "string"},
+    },
+    "required": ["question", "answer"],
+}
+
+_FILL_IN_BLANK_EXERCISE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "question": {"type": "string"},
+        "answers": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["question", "answers"],
+}
+
+_MATCHING_PAIR_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "left": {"type": "string"},
+        "right": {"type": "string"},
+    },
+    "required": ["left", "right"],
+}
+
+_TRUE_FALSE_STATEMENT_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "statement": {"type": "string"},
+        "is_true": {"type": "boolean"},
+        "explanation": {"type": "string"},
+    },
+    "required": ["statement", "is_true", "explanation"],
+}
+
+_CASE_STUDY_QUESTION_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "question": {"type": "string"},
+        "sample_answer": {"type": "string"},
+    },
+    "required": ["question", "sample_answer"],
+}
+
+_SORTING_CATEGORY_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "items": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["name", "items"],
+}
+
+_SPOTLIGHT_ITEM_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "type": {"type": "string"},
+        "content": {"type": "string"},
+    },
+    "required": ["type", "content"],
+}
+
+# Section item schemas — one entry per row in the "sections" array
+_SECTION_SCHEMAS: dict[str, dict] = {
+    "lecture": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "content": {"type": "string"},
+        },
+        "required": ["title", "content"],
+    },
+    "flashcards": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "flashcards": {"type": "array", "items": _FLASHCARD_ITEM_SCHEMA},
+        },
+        "required": ["title", "flashcards"],
+    },
+    "quiz": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "questions": {"type": "array", "items": _QUIZ_QUESTION_SCHEMA},
+        },
+        "required": ["title", "questions"],
+    },
+    "fill_in_the_blank": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "exercises": {"type": "array", "items": _FILL_IN_BLANK_EXERCISE_SCHEMA},
+        },
+        "required": ["title", "exercises"],
+    },
+    "multiple_choice": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "questions": {"type": "array", "items": _QUIZ_QUESTION_SCHEMA},
+        },
+        "required": ["title", "questions"],
+    },
+    "matching": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "pairs": {"type": "array", "items": _MATCHING_PAIR_SCHEMA},
+            "instruction": {"type": "string"},
+        },
+        "required": ["title", "pairs", "instruction"],
+    },
+    "ordering": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "items": {"type": "array", "items": {"type": "string"}},
+            "instruction": {"type": "string"},
+        },
+        "required": ["title", "items", "instruction"],
+    },
+    "true_false": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "statements": {"type": "array", "items": _TRUE_FALSE_STATEMENT_SCHEMA},
+        },
+        "required": ["title", "statements"],
+    },
+    "case_study": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "scenario": {"type": "string"},
+            "questions": {"type": "array", "items": _CASE_STUDY_QUESTION_SCHEMA},
+        },
+        "required": ["title", "scenario", "questions"],
+    },
+    "sorting": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "instruction": {"type": "string"},
+            "categories": {"type": "array", "items": _SORTING_CATEGORY_SCHEMA},
+        },
+        "required": ["title", "instruction", "categories"],
+    },
+    "spotlight": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "highlights": {"type": "array", "items": _SPOTLIGHT_ITEM_SCHEMA},
+        },
+        "required": ["title", "highlights"],
+    },
+}
+
+
+def _make_material_tool(material_type: str, description: str) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": f"submit_{material_type}",
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "sections": {
+                        "type": "array",
+                        "items": _SECTION_SCHEMAS[material_type],
+                    },
+                },
+                "required": ["title", "description", "sections"],
+            },
+        },
+    }
+
+
+_MATERIAL_TOOLS: dict[str, dict] = {
+    "flashcards": _make_material_tool("flashcards", "Submit generated flashcard content"),
+    "quiz": _make_material_tool("quiz", "Submit generated quiz questions"),
+    "fill_in_the_blank": _make_material_tool(
+        "fill_in_the_blank", "Submit fill-in-the-blank exercises"
+    ),
+    "multiple_choice": _make_material_tool(
+        "multiple_choice", "Submit multi-select questions"
+    ),
+    "matching": _make_material_tool("matching", "Submit matching exercises"),
+    "ordering": _make_material_tool("ordering", "Submit ordering exercises"),
+    "true_false": _make_material_tool("true_false", "Submit true/false statements"),
+    "case_study": _make_material_tool("case_study", "Submit case studies"),
+    "sorting": _make_material_tool("sorting", "Submit sorting/categorisation exercises"),
+    "spotlight": _make_material_tool("spotlight", "Submit spotlight highlights"),
+}
+
+
+def _make_extension_tool(material_type: str) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": f"submit_{material_type}_sections",
+            "description": f"Submit 1-3 new {material_type} sections",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sections": {
+                        "type": "array",
+                        "items": _SECTION_SCHEMAS[material_type],
+                    },
+                },
+                "required": ["sections"],
+            },
+        },
+    }
+
+
+_TRACK_SUGGESTION_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "submit_tracks",
+        "description": "Submit 2-3 suggested specialisation learning tracks",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tracks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "description": {"type": "string"},
+                            "subtopics": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["title", "description", "subtopics"],
+                    },
+                },
+            },
+            "required": ["tracks"],
+        },
+    },
+}
+
+_SUBTOPICS_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "submit_subtopics",
+        "description": "Submit new subtopic titles to extend the course",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "subtopics": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["subtopics"],
+        },
+    },
+}
+
+# ── Simplified system prompts (no JSON format instructions) ───────────────────
+
+_MATERIAL_SYSTEM_PROMPTS: dict[str, str] = {
+    "flashcards": """You are a flashcard generator for an educational course. Generate at least 15 flashcards per subtopic — more is better.
+
 Rules:
-- One section per subtopic, using the exact subtopic titles provided
-- At least 15 flashcards per section — MORE IS BETTER. Generate as many as you can fit.
+- One section per subtopic using the exact subtopic titles provided
+- At least 15 flashcards per section — MORE IS BETTER
 - Cover definitions, facts, comparisons, cause-effect relationships, examples
-- Questions should be clear and concise; answers should be informative but brief
+- Questions should be clear and concise; answers informative but brief
 - Match the difficulty level specified""",
-    "quiz": """You are a quiz question generator for an educational course. You MUST respond with ONLY valid JSON, no markdown fences. Just the raw JSON object.
-
-Generate quiz questions for the given subtopics. Create AS MANY questions as you can for each subtopic — the minimum is 15 per subtopic, but generate more if you can.
-
-Output format:
-{
-  "title": "Knowledge Check Quiz",
-  "description": "Test your understanding of the material",
-  "sections": [
-    {
-      "title": "Subtopic Name",
-      "questions": [
-        {
-          "question": "What is the correct answer?",
-          "answers": [
-            {"answer": "Wrong answer A", "is_correct": false},
-            {"answer": "Correct answer", "is_correct": true},
-            {"answer": "Wrong answer B", "is_correct": false},
-            {"answer": "Wrong answer C", "is_correct": false}
-          ]
-        }
-      ]
-    }
-  ]
-}
+    "quiz": """You are a quiz question generator for an educational course. Generate at least 15 questions per subtopic — more is better.
 
 Rules:
-- One section per subtopic, using the exact subtopic titles provided
-- At least 15 questions per section — MORE IS BETTER. Generate as many as you can fit.
+- One section per subtopic using the exact subtopic titles provided
+- At least 15 questions per section — MORE IS BETTER
 - Each question MUST have exactly 4 answers with exactly ONE correct
 - Vary question types: recall, application, analysis, comparison
 - Wrong answers should be plausible distractors
 - Match the difficulty level specified""",
-    "fill_in_the_blank": """You are a fill-in-the-blank exercise generator for an educational course. You MUST respond with ONLY valid JSON, no markdown fences. Just the raw JSON object.
-
-Generate fill-in-the-blank exercises for the given subtopics. Create AS MANY exercises as you can per subtopic — the minimum is 15 per subtopic, but generate more if you can.
-
-Output format:
-{
-  "title": "Fill in the Blanks",
-  "description": "Complete the sentences with the correct words",
-  "sections": [
-    {
-      "title": "Subtopic Name",
-      "exercises": [
-        {
-          "question": "The ___ is the powerhouse of the ___.",
-          "answers": ["mitochondria", "cell"]
-        }
-      ]
-    }
-  ]
-}
-
-CRITICAL: The output uses an "exercises" array where each element has "question" and "answers" fields.
+    "fill_in_the_blank": """You are a fill-in-the-blank exercise generator for an educational course. Generate at least 15 exercises per subtopic — more is better.
 
 Rules:
-- One section per subtopic, using the exact subtopic titles provided
-- At least 15 exercises per section — MORE IS BETTER. Generate as many as you can fit.
+- One section per subtopic using the exact subtopic titles provided
+- At least 15 exercises per section — MORE IS BETTER
 - Each blank is represented by three underscores: ___
 - The number of ___ in each question MUST match the number of answers
-- Exercises should test key vocabulary, relationships, and concepts
+- Test key vocabulary, relationships, and concepts
 - Match the difficulty level specified""",
-    "multiple_choice": """You are a multiple-choice (multi-select) question generator for an educational course. You MUST respond with ONLY valid JSON, no markdown fences. Just the raw JSON object.
-
-Generate multi-select questions for the given subtopics. Create AS MANY questions as you can per subtopic — the minimum is 15 per subtopic, but generate more if you can.
-
-Output format:
-{
-  "title": "Multi-Select Questions",
-  "description": "Select all correct answers for each question",
-  "sections": [
-    {
-      "title": "Subtopic Name",
-      "questions": [
-        {
-          "question": "Select all that apply: Which of these are correct?",
-          "answers": [
-            {"answer": "Correct answer A", "is_correct": true},
-            {"answer": "Wrong answer B", "is_correct": false},
-            {"answer": "Correct answer C", "is_correct": true},
-            {"answer": "Wrong answer D", "is_correct": false}
-          ]
-        }
-      ]
-    }
-  ]
-}
+    "multiple_choice": """You are a multiple-choice (multi-select) question generator for an educational course. Generate at least 15 questions per subtopic — more is better.
 
 Rules:
-- One section per subtopic, using the exact subtopic titles provided
-- At least 15 questions per section — MORE IS BETTER. Generate as many as you can fit.
+- One section per subtopic using the exact subtopic titles provided
+- At least 15 questions per section — MORE IS BETTER
 - Each question should have 4-5 answers with at least 1 correct answer
 - Label questions with "Select all that apply:"
 - Test deeper understanding: combinations, relationships, classifications
 - Match the difficulty level specified""",
-    "matching": """You are a matching exercise generator for an educational course. You MUST respond with ONLY valid JSON, no markdown fences. Just the raw JSON object.
-
-Generate matching exercises for the given subtopics. Create 8-12 pairs per subtopic where students match items from two columns.
-
-Output format:
-{
-  "title": "Matching Exercises",
-  "description": "Match the related items together",
-  "sections": [
-    {
-      "title": "Subtopic Name",
-      "pairs": [
-        {"left": "Term A", "right": "Definition of A"},
-        {"left": "Cause X", "right": "Effect of X"}
-      ],
-      "instruction": "Match each term with its definition"
-    }
-  ]
-}
+    "matching": """You are a matching exercise generator for an educational course. Create 8-12 matching pairs per subtopic.
 
 Rules:
-- One section per subtopic, using the exact subtopic titles provided
+- One section per subtopic using the exact subtopic titles provided
 - 8-12 pairs per section
-- Pairs can be term↔definition, cause↔effect, concept↔example, date↔event, etc.
+- Pairs can be term↔definition, cause↔effect, concept↔example, date↔event
 - Left and right items should be concise (1-2 sentences max)
 - Include a clear instruction for each section
 - Match the difficulty level specified""",
-    "ordering": """You are an ordering exercise generator for an educational course. You MUST respond with ONLY valid JSON, no markdown fences. Just the raw JSON object.
-
-Generate ordering exercises for the given subtopics. Create 5-8 items per subtopic that must be arranged in the correct sequence.
-
-Output format:
-{
-  "title": "Ordering Challenges",
-  "description": "Arrange the items in the correct order",
-  "sections": [
-    {
-      "title": "Subtopic Name",
-      "items": ["First step", "Second step", "Third step", "Fourth step", "Fifth step"],
-      "instruction": "Arrange these steps in chronological order"
-    }
-  ]
-}
+    "ordering": """You are an ordering exercise generator for an educational course. Create 5-8 items per subtopic to arrange in sequence.
 
 Rules:
-- One section per subtopic, using the exact subtopic titles provided
+- One section per subtopic using the exact subtopic titles provided
 - 5-8 items per section, stored in the CORRECT order
-- Items can be chronological steps, procedural stages, ranked importance, etc.
+- Items can be chronological steps, procedural stages, ranked importance
 - Each item should be concise (1 sentence)
 - Include a clear instruction for each section
 - Match the difficulty level specified""",
-    "true_false": """You are a true/false question generator for an educational course. You MUST respond with ONLY valid JSON, no markdown fences. Just the raw JSON object.
-
-Generate true/false statements for the given subtopics. Create 12-15 statements per subtopic.
-
-Output format:
-{
-  "title": "True or False",
-  "description": "Determine whether each statement is true or false",
-  "sections": [
-    {
-      "title": "Subtopic Name",
-      "statements": [
-        {"statement": "The Earth revolves around the Sun.", "is_true": true, "explanation": "The Earth orbits the Sun once every 365.25 days."},
-        {"statement": "Water boils at 50°C at sea level.", "is_true": false, "explanation": "Water boils at 100°C (212°F) at sea level."}
-      ]
-    }
-  ]
-}
+    "true_false": """You are a true/false question generator for an educational course. Create 12-15 statements per subtopic.
 
 Rules:
-- One section per subtopic, using the exact subtopic titles provided
+- One section per subtopic using the exact subtopic titles provided
 - 12-15 statements per section
 - Statements MUST be unambiguous — clearly true or clearly false
 - Every statement needs a brief explanation (1-2 sentences)
 - Aim for roughly 50/50 split between true and false
 - Match the difficulty level specified""",
-    "case_study": """You are a case study generator for an educational course. You MUST respond with ONLY valid JSON, no markdown fences. Just the raw JSON object.
-
-Generate case studies for the given subtopics. Create 1 scenario (200-400 words) with 3-4 discussion questions per subtopic.
-
-Output format:
-{
-  "title": "Case Studies",
-  "description": "Apply your knowledge to real-world scenarios",
-  "sections": [
-    {
-      "title": "Subtopic Name",
-      "scenario": "## The Scenario Title\\n\\nDetailed markdown scenario text describing a real-world situation...",
-      "questions": [
-        {"question": "What factors contributed to the outcome?", "sample_answer": "The key factors were..."},
-        {"question": "How would you approach this differently?", "sample_answer": "An alternative approach would be..."}
-      ]
-    }
-  ]
-}
+    "case_study": """You are a case study generator for an educational course. Create 1 scenario with 3-4 discussion questions per subtopic.
 
 Rules:
-- One section per subtopic, using the exact subtopic titles provided
+- One section per subtopic using the exact subtopic titles provided
 - Scenario should be 200-400 words in markdown format
 - 3-4 discussion questions per scenario with sample answers
 - Scenarios should feel realistic and relatable
 - Questions should test higher-order thinking: analysis, evaluation, application
 - Match the difficulty level specified""",
-    "sorting": """You are a sorting/categorisation exercise generator for an educational course. You MUST respond with ONLY valid JSON, no markdown fences. Just the raw JSON object.
-
-Generate sorting exercises for the given subtopics. Create 2-4 categories with 3-6 items each per subtopic.
-
-Output format:
-{
-  "title": "Sorting Exercises",
-  "description": "Sort the items into the correct categories",
-  "sections": [
-    {
-      "title": "Subtopic Name",
-      "instruction": "Sort these items into the correct categories",
-      "categories": [
-        {"name": "Category A", "items": ["Item 1", "Item 2", "Item 3"]},
-        {"name": "Category B", "items": ["Item 4", "Item 5", "Item 6"]}
-      ]
-    }
-  ]
-}
+    "sorting": """You are a sorting/categorisation exercise generator for an educational course. Create 2-4 categories with 3-6 items each per subtopic.
 
 Rules:
-- One section per subtopic, using the exact subtopic titles provided
+- One section per subtopic using the exact subtopic titles provided
 - 2-4 categories per section with 3-6 items each
-- Categories should be meaningful classifications related to the subtopic
+- Categories should be meaningful classifications
 - Items should clearly belong to one category only
 - Include a clear instruction for each section
 - Match the difficulty level specified""",
-    "spotlight": """You are a spotlight content generator for an educational course. You MUST respond with ONLY valid JSON, no markdown fences. Just the raw JSON object.
-
-Generate spotlight highlights (fun facts, tips, mnemonics, and analogies) for the given subtopics. Create 4-6 highlights per subtopic.
-
-Output format:
-{
-  "title": "Spotlight",
-  "description": "Fun facts, tips, and memory aids",
-  "sections": [
-    {
-      "title": "Subtopic Name",
-      "highlights": [
-        {"type": "fact", "content": "Did you know? An interesting fact about..."},
-        {"type": "tip", "content": "Pro tip: A useful tip for..."},
-        {"type": "mnemonic", "content": "Remember: A memory aid for..."},
-        {"type": "analogy", "content": "Think of it like: An analogy for..."}
-      ]
-    }
-  ]
-}
+    "spotlight": """You are a spotlight content generator for an educational course. Create 4-6 highlights (fun facts, tips, mnemonics, analogies) per subtopic.
 
 Rules:
-- One section per subtopic, using the exact subtopic titles provided
+- One section per subtopic using the exact subtopic titles provided
 - 4-6 highlights per section
-- Use a mix of types: "fact", "tip", "mnemonic", "analogy"
-- Facts should be surprising or memorable
-- Tips should be practical and actionable
-- Mnemonics should be catchy and easy to remember
-- Analogies should relate to everyday experiences
+- Use a mix of types: fact, tip, mnemonic, analogy
+- Facts should be surprising or memorable; tips practical and actionable
 - Match the difficulty level specified""",
 }
 
+_EXTENSION_SYSTEM_PROMPT = """You are a course content extender. Given a course's existing sections and a user request, generate 1-3 new sections that complement and extend the existing content. Do NOT repeat any existing section titles."""
+
+_TRACK_SUGGESTION_SYSTEM_PROMPT = """You are a learning advisor. Given a student's course data and quiz performance, suggest 2-3 diverse specialisation tracks they could pursue. One track could go deeper into strong areas, one could strengthen weak areas, and one could explore related topics."""
+
+_SUBTOPICS_SYSTEM_PROMPT = """You are a course content planner. Given an existing course's topic, difficulty, and current subtopic titles, suggest 3-5 NEW subtopic titles that naturally continue the learning path. Do NOT repeat any existing subtopic titles. Build on what was already covered — go deeper or explore adjacent concepts."""
 
 _EXPLANATION_SYSTEM_PROMPT = """You are a friendly educational tutor. A student got a question wrong. Explain why the correct answer is right and why their choice was wrong. Keep it brief (2-4 sentences), encouraging, and educational. Do not repeat the question — jump straight into the explanation."""
 
 
-_EXTENSION_SYSTEM_PROMPT = """You are a course content extender. Given the existing section titles of a course material and a user prompt, generate 1-3 NEW sections that complement the existing content.
+_EXA_SEARCH_RESULTS = 4
+_EXA_CONTENT_CHARS = 8000
+_EXA_SECTION_CHARS = 1500
 
-You MUST respond with ONLY valid JSON, no markdown fences, no explanation text. Just the raw JSON array.
 
-The JSON must be an array of section objects matching the format for the material type specified. Do NOT repeat existing section titles."""
+async def _fetch_exa_context(
+    ctx: AbstractAuthContext,
+    topic: str,
+) -> str | None:
+    """Search Exa for current, real-world information about the course topic.
+
+    Returns a formatted reference string to inject into the LLM prompts, or
+    None if Exa is not configured or the search fails.
+    """
+    if ctx.exa is None:
+        return None
+
+    try:
+        results = await ctx.exa.client.search_and_contents(
+            f"educational overview of {topic}",
+            type="fast",
+            num_results=_EXA_SEARCH_RESULTS,
+            text={"max_characters": _EXA_CONTENT_CHARS},
+        )
+    except Exception:
+        logger.exception(
+            "Exa search failed; continuing without web context",
+            extra={"topic": topic},
+        )
+        return None
+
+    snippets: list[str] = []
+    for result in results.results:
+        text = getattr(result, "text", None) or ""
+        title = getattr(result, "title", None) or "Untitled"
+        url = getattr(result, "url", None) or ""
+        if not text.strip():
+            continue
+        snippet = text.strip()[: _EXA_SECTION_CHARS]
+        snippets.append(f"### {title}\nSource: {url}\n\n{snippet}")
+
+    if not snippets:
+        return None
+
+    logger.info(
+        "Exa context fetched",
+        extra={"topic": topic, "result_count": len(snippets)},
+    )
+    joined = "\n\n---\n\n".join(snippets)
+    return (
+        "## Web Reference Material\n\n"
+        "The following excerpts were retrieved from the web and reflect current, "
+        "real-world knowledge about the topic. Use them to ground and enrich your "
+        "course content where relevant, but do not copy them verbatim.\n\n"
+        f"{joined}"
+    )
 
 
 def _build_user_prompt(
@@ -414,21 +587,30 @@ def _build_user_prompt(
     difficulty: CourseDifficulty,
     course_type: CourseType,
     additional_details: str | None,
+    exa_context: str | None = None,
 ) -> str:
     prompt = (
         f"Create a {difficulty.value} level {course_type.value} course about: {topic}"
     )
     if additional_details:
         prompt += f"\n\nAdditional details from the student: {additional_details}"
+    if exa_context:
+        prompt += f"\n\n{exa_context}"
     return prompt
 
 
-def _strip_markdown_fences(text: str) -> str:
-    """Remove markdown code fences if the model wraps its JSON in them."""
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*\n?", "", text)
-    text = re.sub(r"\n?```\s*$", "", text)
-    return text.strip()
+def _extract_tool_args(completion) -> dict | None:  # type: ignore[no-untyped-def]
+    """Extract JSON arguments from the first tool call in a completion."""
+    choices = completion.choices
+    if not choices:
+        return None
+    tool_calls = choices[0].message.tool_calls
+    if not tool_calls:
+        return None
+    try:
+        return json.loads(tool_calls[0].function.arguments)
+    except (json.JSONDecodeError, AttributeError):
+        return None
 
 
 def _map_topic(topic_str: str) -> CourseTopic:
@@ -562,8 +744,7 @@ def _parse_section_material(
 _MATERIAL_GENERATION_MAX_RETRIES = 3
 _MATERIAL_GENERATION_RETRY_DELAY = 2.0  # seconds, doubles each retry
 
-# Featherless.ai limits concurrent requests to 4; use 3 to leave headroom
-_LLM_SEMAPHORE = asyncio.Semaphore(3)
+_LLM_SEMAPHORE = asyncio.Semaphore(10)
 
 
 async def _generate_material_type(
@@ -572,16 +753,24 @@ async def _generate_material_type(
     topic: str,
     difficulty: CourseDifficulty,
     subtopics: list[str],
+    *,
+    course_id: str = "",
 ) -> dict | None:
-    """Generate a single material type using its own dedicated LLM call.
+    """Generate a single material type using tool calling.
 
     Retries up to _MATERIAL_GENERATION_MAX_RETRIES times with exponential
     back-off to handle rate limits when multiple calls run in parallel.
     """
-    system_prompt = _MATERIAL_GENERATION_PROMPTS.get(material_type)
-    if not system_prompt:
+    tool = _MATERIAL_TOOLS.get(material_type)
+    system_prompt = _MATERIAL_SYSTEM_PROMPTS.get(material_type)
+    if not tool or not system_prompt:
+        logger.error(
+            "No tool/prompt registered for material type",
+            extra={"material_type": material_type, "course_id": course_id},
+        )
         return None
 
+    tool_name = tool["function"]["name"]
     user_msg = (
         f"Course topic: {topic}\n"
         f"Difficulty: {difficulty.value}\n"
@@ -589,15 +778,15 @@ async def _generate_material_type(
         f"Generate as much content as possible for every subtopic."
     )
 
-    import time as _time
-
     last_error: Exception | None = None
     for attempt in range(_MATERIAL_GENERATION_MAX_RETRIES):
         try:
             logger.info(
-                "LLM call starting",
+                "Material LLM call starting",
                 extra={
+                    "course_id": course_id,
                     "material_type": material_type,
+                    "tool": tool_name,
                     "attempt": attempt + 1,
                     "model": settings.OPENAI_MODEL,
                     "subtopic_count": len(subtopics),
@@ -605,10 +794,12 @@ async def _generate_material_type(
             )
             t0 = _time.monotonic()
             async with _LLM_SEMAPHORE:
-                logger.info(
-                    "LLM semaphore acquired",
-                    extra={"material_type": material_type, "wait_s": round(_time.monotonic() - t0, 2)},
-                )
+                wait_s = round(_time.monotonic() - t0, 2)
+                if wait_s > 0.1:
+                    logger.info(
+                        "Material LLM semaphore wait",
+                        extra={"course_id": course_id, "material_type": material_type, "wait_s": wait_s},
+                    )
                 t1 = _time.monotonic()
                 completion = await ctx.openai.client.chat.completions.create(
                     model=settings.OPENAI_MODEL,
@@ -616,16 +807,24 @@ async def _generate_material_type(
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_msg},
                     ],
+                    tools=[tool],
+                    tool_choice={"type": "function", "function": {"name": tool_name}},
                     temperature=0.7,
                     max_completion_tokens=16384,
                 )
             elapsed = round(_time.monotonic() - t1, 2)
+            choice = completion.choices[0] if completion.choices else None
+            finish_reason = choice.finish_reason if choice else "no_choice"
+            has_tool_calls = bool(choice and choice.message.tool_calls)
             usage = completion.usage
             logger.info(
-                "LLM call completed",
+                "Material LLM call completed",
                 extra={
+                    "course_id": course_id,
                     "material_type": material_type,
                     "elapsed_s": elapsed,
+                    "finish_reason": finish_reason,
+                    "has_tool_calls": has_tool_calls,
                     "prompt_tokens": usage.prompt_tokens if usage else None,
                     "completion_tokens": usage.completion_tokens if usage else None,
                     "total_tokens": usage.total_tokens if usage else None,
@@ -636,50 +835,55 @@ async def _generate_material_type(
             last_error = exc
             delay = _MATERIAL_GENERATION_RETRY_DELAY * (2**attempt)
             logger.exception(
-                "Material generation attempt failed, retrying",
+                "Material LLM call failed",
                 extra={
+                    "course_id": course_id,
                     "material_type": material_type,
                     "attempt": attempt + 1,
                     "max_retries": _MATERIAL_GENERATION_MAX_RETRIES,
-                    "retry_delay": delay,
+                    "retry_delay_s": delay,
+                    "error": str(exc),
                 },
             )
             await asyncio.sleep(delay)
     else:
         logger.error(
-            "Material generation failed after all retries",
-            extra={"material_type": material_type},
+            "Material generation exhausted all retries",
+            extra={
+                "course_id": course_id,
+                "material_type": material_type,
+                "max_retries": _MATERIAL_GENERATION_MAX_RETRIES,
+            },
             exc_info=last_error,
         )
         return None
 
-    raw = completion.choices[0].message.content
-    if not raw:
-        logger.warning(
-            "LLM returned empty content",
-            extra={"material_type": material_type},
+    parsed = _extract_tool_args(completion)
+    if parsed is None:
+        choice = completion.choices[0] if completion.choices else None
+        logger.error(
+            "Material LLM returned no tool call",
+            extra={
+                "course_id": course_id,
+                "material_type": material_type,
+                "finish_reason": choice.finish_reason if choice else "unknown",
+                "message_content_preview": (
+                    (choice.message.content or "")[:200] if choice else ""
+                ),
+            },
         )
         return None
 
-    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+    sections = parsed.get("sections", [])
     logger.info(
-        "Parsing LLM response",
-        extra={"material_type": material_type, "response_length": len(raw)},
+        "Material tool call parsed",
+        extra={
+            "course_id": course_id,
+            "material_type": material_type,
+            "raw_section_count": len(sections),
+        },
     )
-    try:
-        cleaned = _strip_markdown_fences(raw)
-        parsed = json.loads(cleaned)
-        logger.info(
-            "Material JSON parsed successfully",
-            extra={"material_type": material_type, "keys": list(parsed.keys()) if isinstance(parsed, dict) else "array"},
-        )
-        return parsed
-    except json.JSONDecodeError:
-        logger.exception(
-            "Failed to parse material JSON",
-            extra={"material_type": material_type, "raw_preview": raw[:300]},
-        )
-        return None
+    return parsed
 
 
 def _parse_fill_in_blank_sections(sections_raw: list[dict]) -> list[dict]:
@@ -707,15 +911,28 @@ async def _create_material_from_data(
     course_id: str,
     user_id: str,
     material_type: CourseMaterialType,
-    mat_data: dict,
+    mat_data: dict | str | None,
 ) -> CourseMaterialModel | None:
     """Parse raw AI material data and create the material in the database."""
+    if not isinstance(mat_data, dict):
+        logger.error(
+            "Material data is not a dict — material dropped",
+            extra={
+                "course_id": course_id,
+                "material_type": material_type,
+                "mat_data_type": type(mat_data).__name__,
+            },
+        )
+        return None
+
     sections_raw = mat_data.get("sections", [])
 
     if material_type == "fill_in_the_blank":
         sections_raw = _parse_fill_in_blank_sections(sections_raw)
 
+    raw_count = len(sections_raw)
     parsed_sections: list[MaterialSectionModel] = []
+    failed_titles: list[str] = []
     for idx, section_raw in enumerate(sections_raw):
         material = _parse_section_material(material_type, section_raw)
         if material is not None:
@@ -727,8 +944,33 @@ async def _create_material_from_data(
                     is_completed=False,
                 ),
             )
+        else:
+            failed_titles.append(section_raw.get("title", f"section[{idx}]"))
+
+    if failed_titles:
+        logger.warning(
+            "Some sections failed to parse",
+            extra={
+                "course_id": course_id,
+                "material_type": material_type,
+                "raw_count": raw_count,
+                "parsed_count": len(parsed_sections),
+                "failed_titles": failed_titles,
+            },
+        )
 
     if not parsed_sections:
+        logger.error(
+            "All sections failed to parse — material dropped",
+            extra={
+                "course_id": course_id,
+                "material_type": material_type,
+                "raw_count": raw_count,
+                "section_keys_sample": (
+                    list(sections_raw[0].keys()) if sections_raw else []
+                ),
+            },
+        )
         return None
 
     return await ctx.course_materials.create(
@@ -748,9 +990,7 @@ async def generate_course(
     difficulty: CourseDifficulty,
     course_type: CourseType,
     additional_details: str | None = None,
-) -> CourseError.OnSuccess[tuple[CourseModel, list[CourseMaterialModel]]]:
-    user_prompt = _build_user_prompt(topic, difficulty, course_type, additional_details)
-
+) -> CourseError.OnSuccess[CourseModel]:
     logger.info(
         "Generating course via AI (phase 1: metadata + lectures)",
         extra={
@@ -760,9 +1000,10 @@ async def generate_course(
         },
     )
 
-    # ── Phase 1: Generate metadata + subtopics + lectures ──
-    import time as _time
+    exa_context = await _fetch_exa_context(ctx, topic)
+    user_prompt = _build_user_prompt(topic, difficulty, course_type, additional_details, exa_context)
 
+    # ── Phase 1: Generate metadata + subtopics + lectures ──
     logger.info("Phase 1 LLM call starting", extra={"model": settings.OPENAI_MODEL})
     t0 = _time.monotonic()
     try:
@@ -772,6 +1013,8 @@ async def generate_course(
                 {"role": "system", "content": _PHASE1_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
+            tools=[_PHASE1_TOOL],
+            tool_choice={"type": "function", "function": {"name": "submit_course"}},
             temperature=0.7,
             max_completion_tokens=16384,
         )
@@ -791,40 +1034,18 @@ async def generate_course(
         },
     )
 
-    raw_content = completion.choices[0].message.content
-    if not raw_content:
-        logger.error("Phase 1 LLM returned empty content")
+    data = _extract_tool_args(completion)
+    if data is None:
+        logger.error("Phase 1 LLM returned no tool call")
         return CourseError.GENERATION_FAILED
 
-    raw_content = re.sub(r"<think>.*?</think>", "", raw_content, flags=re.DOTALL)
-    logger.info(
-        "Phase 1 response received",
-        extra={"response_length": len(raw_content)},
-    )
-
-    try:
-        cleaned = _strip_markdown_fences(raw_content)
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        logger.exception(
-            "Failed to parse phase 1 AI response", extra={"raw": raw_content[:500]}
-        )
-        return CourseError.INVALID_AI_RESPONSE
-
-    required_keys = {"name", "description", "estimated_hours", "tags", "subtopics", "lecture"}
-    if not required_keys.issubset(data.keys()):
-        logger.error(
-            "Phase 1 response missing keys", extra={"keys": list(data.keys())}
-        )
-        return CourseError.INVALID_AI_RESPONSE
-
-    subtopics: list[str] = data["subtopics"]
+    subtopics: list[str] = data.get("subtopics", [])
     logger.info(
         "Phase 1 parsed successfully",
         extra={"subtopic_count": len(subtopics), "subtopics": subtopics},
     )
 
-    # Create the course
+    # Create the course with status=GENERATING; Phase 2 will update it to READY/FAILED.
     course_topic = _map_topic(topic)
     colour = data.get("colour", "#6366f1")
     try:
@@ -840,6 +1061,7 @@ async def generate_course(
             basis_materials=[],
             publicity=CoursePublicity.PRIVATE,
             colour=colour,
+            status=CourseGenerationStatus.GENERATING,
         )
     except Exception:
         logger.exception("Failed to create course in database")
@@ -851,69 +1073,111 @@ async def generate_course(
         relationship=CourseAssignRelationship.PERSONAL,
     )
 
-    # Save lectures
-    materials: list[CourseMaterialModel] = []
+    # Save lectures (synchronous — needed before returning so the page has content)
     lecture_mat = await _create_material_from_data(
         ctx, course.id, ctx.user.id, "lecture", data["lecture"],
     )
     if lecture_mat:
-        materials.append(lecture_mat)
+        logger.info("Lecture material saved", extra={"course_id": course.id})
 
-    # ── Phase 2: Generate 10 material types in parallel ──
-    logger.info(
-        "Generating course via AI (phase 2: 10 material types in parallel)",
-        extra={"course_id": course.id, "subtopics": subtopics},
+    # ── Phase 2: Generate 10 material types in background ──
+    asyncio.create_task(
+        _generate_course_materials(ctx, course.id, topic, difficulty, subtopics),
+        name=f"phase2:{course.id}",
     )
 
+    total_elapsed = round(_time.monotonic() - t0, 2)
+    logger.info(
+        "Course phase 1 complete, materials generating in background",
+        extra={
+            "course_id": course.id,
+            "course_name": course.name,
+            "phase1_elapsed_s": total_elapsed,
+        },
+    )
+    return course
+
+
+async def _generate_course_materials(
+    ctx: AbstractAuthContext,
+    course_id: str,
+    topic: str,
+    difficulty: CourseDifficulty,
+    subtopics: list[str],
+) -> None:
+    logger.info(
+        "Phase 2 starting (10 material types in parallel)",
+        extra={"course_id": course_id, "subtopics": subtopics},
+    )
     material_types: list[CourseMaterialType] = [
         "flashcards", "quiz", "fill_in_the_blank", "multiple_choice",
         "matching", "ordering", "true_false", "case_study", "sorting", "spotlight",
     ]
     generation_tasks = [
-        _generate_material_type(ctx, mt, topic, difficulty, subtopics)
+        _generate_material_type(ctx, mt, topic, difficulty, subtopics, course_id=course_id)
         for mt in material_types
     ]
     t2 = _time.monotonic()
-    results = await asyncio.gather(*generation_tasks, return_exceptions=True)
+    try:
+        results = await asyncio.gather(*generation_tasks, return_exceptions=True)
+    except Exception:
+        logger.exception("Phase 2 gather raised unexpectedly", extra={"course_id": course_id})
+        await ctx.courses.update_status(course_id, CourseGenerationStatus.FAILED)
+        return
+
     phase2_elapsed = round(_time.monotonic() - t2, 2)
-    logger.info(
-        "Phase 2 all LLM calls finished",
-        extra={"course_id": course.id, "elapsed_s": phase2_elapsed},
-    )
+
+    user_id = ctx.user.id
+    save_tasks = []
+    save_material_types = []
+    llm_outcomes: dict[str, str] = {}
 
     for mt, result in zip(material_types, results):
         if isinstance(result, (Exception, BaseException)):
             logger.error(
                 "Material generation raised exception",
-                extra={"material_type": mt},
+                extra={"course_id": course_id, "material_type": mt},
                 exc_info=result,
             )
+            llm_outcomes[mt] = "exception"
             continue
         if result is None:
-            logger.warning(
-                "Material generation returned None",
-                extra={"material_type": mt, "course_id": course.id},
-            )
+            llm_outcomes[mt] = "no_result"
             continue
-        mat = await _create_material_from_data(ctx, course.id, ctx.user.id, mt, result)
-        if mat:
-            logger.info(
-                "Material saved to database",
-                extra={"material_type": mt, "section_count": len(mat.data)},
-            )
-            materials.append(mat)
+        llm_outcomes[mt] = f"ok:{len(result.get('sections', []))}sections"
+        save_tasks.append(_create_material_from_data(ctx, course_id, user_id, mt, result))
+        save_material_types.append(mt)
 
-    total_elapsed = round(_time.monotonic() - t0, 2)
+    saved = await asyncio.gather(*save_tasks, return_exceptions=True)
+    saved_count = 0
+    save_outcomes: dict[str, str] = {}
+
+    for mt, mat in zip(save_material_types, saved):
+        if isinstance(mat, (Exception, BaseException)):
+            logger.error(
+                "Material DB save raised exception",
+                extra={"course_id": course_id, "material_type": mt},
+                exc_info=mat,
+            )
+            save_outcomes[mt] = "db_error"
+            continue
+        if mat:
+            saved_count += 1
+            save_outcomes[mt] = f"saved:{len(mat.data)}sections"
+        else:
+            save_outcomes[mt] = "dropped"
+
+    await ctx.courses.update_status(course_id, CourseGenerationStatus.READY)
     logger.info(
-        "Course generated successfully",
+        "Course generation complete",
         extra={
-            "course_id": course.id,
-            "course_name": course.name,
-            "total_elapsed_s": total_elapsed,
-            "material_count": len(materials),
+            "course_id": course_id,
+            "phase2_elapsed_s": phase2_elapsed,
+            "materials_saved": saved_count,
+            "llm_outcomes": llm_outcomes,
+            "save_outcomes": save_outcomes,
         },
     )
-    return course, materials
 
 
 async def get_course(
@@ -1046,42 +1310,20 @@ async def extend_course(
     updated_materials: list[CourseMaterialModel] = []
 
     for mat in existing_materials:
+        if mat.type not in _SECTION_SCHEMAS:
+            continue
+
         existing_titles = [s.title for s in mat.data]
         current_count = len(mat.data)
 
-        # Build type-specific format hint
-        match mat.type:
-            case "lecture":
-                format_hint = '{"title": "...", "content": "## markdown..."}'
-            case "flashcards":
-                format_hint = '{"title": "...", "flashcards": [{"question": "...", "answer": "..."}]}'
-            case "quiz":
-                format_hint = '{"title": "...", "questions": [{"question": "...", "answers": [{"answer": "...", "is_correct": true/false}]}]}'
-            case "fill_in_the_blank":
-                format_hint = '{"title": "...", "question": "The ___ is ...", "answers": ["word"]}'
-            case "multiple_choice":
-                format_hint = '{"title": "...", "questions": [{"question": "Select all that apply: ...", "answers": [{"answer": "...", "is_correct": true/false}]}]}'
-            case "matching":
-                format_hint = '{"title": "...", "pairs": [{"left": "...", "right": "..."}], "instruction": "..."}'
-            case "ordering":
-                format_hint = '{"title": "...", "items": ["step1", "step2", ...], "instruction": "..."}'
-            case "true_false":
-                format_hint = '{"title": "...", "statements": [{"statement": "...", "is_true": true/false, "explanation": "..."}]}'
-            case "case_study":
-                format_hint = '{"title": "...", "scenario": "## markdown...", "questions": [{"question": "...", "sample_answer": "..."}]}'
-            case "sorting":
-                format_hint = '{"title": "...", "instruction": "...", "categories": [{"name": "...", "items": ["...", "..."]}]}'
-            case "spotlight":
-                format_hint = '{"title": "...", "highlights": [{"type": "fact|tip|mnemonic|analogy", "content": "..."}]}'
-            case _:
-                continue
-
+        ext_tool = _make_extension_tool(mat.type)
+        tool_name = ext_tool["function"]["name"]
         user_msg = (
+            f"Course topic: {course.name}\n"
             f"Material type: {mat.type}\n"
             f"Existing section titles: {json.dumps(existing_titles)}\n"
-            f"Course topic: {course.name}\n"
             f"User request: {prompt}\n\n"
-            f"Generate 1-3 new sections as a JSON array. Each section format: {format_hint}"
+            f"Generate 1-3 new sections that complement the existing content. Do NOT repeat any existing section titles."
         )
 
         try:
@@ -1091,6 +1333,8 @@ async def extend_course(
                     {"role": "system", "content": _EXTENSION_SYSTEM_PROMPT},
                     {"role": "user", "content": user_msg},
                 ],
+                tools=[ext_tool],
+                tool_choice={"type": "function", "function": {"name": tool_name}},
                 temperature=0.7,
                 max_completion_tokens=4096,
             )
@@ -1100,22 +1344,20 @@ async def extend_course(
             )
             continue
 
-        raw = completion.choices[0].message.content
-        if not raw:
-            continue
-
-        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
-        try:
-            cleaned = _strip_markdown_fences(raw)
-            sections_data = json.loads(cleaned)
-        except json.JSONDecodeError:
-            logger.exception(
-                "Failed to parse extension JSON", extra={"material_type": mat.type}
+        args = _extract_tool_args(completion)
+        if args is None:
+            logger.warning(
+                "Extension LLM returned no tool call",
+                extra={"material_type": mat.type},
             )
             continue
 
+        sections_data = args.get("sections", [])
         if not isinstance(sections_data, list):
             continue
+
+        if mat.type == "fill_in_the_blank":
+            sections_data = _parse_fill_in_blank_sections(sections_data)
 
         new_sections: list[MaterialSectionModel] = []
         for i, section_raw in enumerate(sections_data):
@@ -1141,54 +1383,6 @@ async def extend_course(
             updated_materials.append(updated)
 
     return updated_materials
-
-
-# ---------------------------------------------------------------------------
-# Track suggestion prompt
-# ---------------------------------------------------------------------------
-
-_TRACK_SUGGESTION_PROMPT = """You are a learning advisor. Given a student's course data and quiz performance, suggest 2-3 specialisation tracks they could pursue to deepen their knowledge.
-
-You MUST respond with ONLY valid JSON, no markdown fences, no explanation text. Just the raw JSON array.
-
-Each track should be:
-[
-  {
-    "title": "Track Title",
-    "description": "A 1-2 sentence description of what this track covers",
-    "subtopics": ["Subtopic A", "Subtopic B", "Subtopic C"]
-  }
-]
-
-Make tracks diverse — one could go deeper into strong areas, one could strengthen weak areas, and one could explore related topics."""
-
-
-_CONTINUATION_PROMPT = """You are a course content extender. Given an existing course's topic, difficulty, and current subtopic titles, generate NEW subtopics that naturally continue the learning path.
-
-You MUST respond with ONLY valid JSON, no markdown fences, no explanation text. Just the raw JSON object.
-
-Generate content for 3-5 NEW subtopics. Each subtopic needs ALL ELEVEN material types. Use this exact structure:
-{
-  "materials": {
-    "lecture": {"sections": [{"title": "New Subtopic", "content": "## markdown..."}]},
-    "flashcards": {"sections": [{"title": "New Subtopic", "flashcards": [{"question": "...", "answer": "..."}]}]},
-    "quiz": {"sections": [{"title": "New Subtopic", "questions": [{"question": "...", "answers": [{"answer": "...", "is_correct": true/false}]}]}]},
-    "fill_in_the_blank": {"sections": [{"title": "New Subtopic", "question": "The ___ is ...", "answers": ["word"]}]},
-    "multiple_choice": {"sections": [{"title": "New Subtopic", "questions": [{"question": "Select all that apply: ...", "answers": [{"answer": "...", "is_correct": true/false}]}]}]},
-    "matching": {"sections": [{"title": "New Subtopic", "pairs": [{"left": "...", "right": "..."}], "instruction": "..."}]},
-    "ordering": {"sections": [{"title": "New Subtopic", "items": ["step1", "step2"], "instruction": "..."}]},
-    "true_false": {"sections": [{"title": "New Subtopic", "statements": [{"statement": "...", "is_true": true, "explanation": "..."}]}]},
-    "case_study": {"sections": [{"title": "New Subtopic", "scenario": "## markdown...", "questions": [{"question": "...", "sample_answer": "..."}]}]},
-    "sorting": {"sections": [{"title": "New Subtopic", "instruction": "...", "categories": [{"name": "...", "items": ["...", "..."]}]}]},
-    "spotlight": {"sections": [{"title": "New Subtopic", "highlights": [{"type": "fact", "content": "..."}]}]}
-  }
-}
-
-Rules:
-- Do NOT repeat any existing subtopic titles
-- Build on what was already covered — go deeper or explore adjacent concepts
-- Keep the same difficulty level
-- Generate at least 4 flashcards, 3 quiz questions, 2 fill-in-blank, 3 multiple-choice questions, 6 matching pairs, 5 ordering items, 8 true/false statements, 1 case study with 3 questions, 2 sorting categories, and 4 spotlight highlights per subtopic"""
 
 
 # ---------------------------------------------------------------------------
@@ -1289,7 +1483,12 @@ async def get_journey(
         course_id, ctx.user.id
     )
     if not materials:
-        return CourseError.NOT_FOUND
+        return {
+            "steps": [],
+            "total_steps": 0,
+            "completed_steps": 0,
+            "recommended_step_index": None,
+        }
 
     steps = _build_interleaved_journey(materials)
     total_steps = len(steps)
@@ -1386,9 +1585,11 @@ async def suggest_tracks(
         completion = await ctx.openai.client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": _TRACK_SUGGESTION_PROMPT},
+                {"role": "system", "content": _TRACK_SUGGESTION_SYSTEM_PROMPT},
                 {"role": "user", "content": user_msg},
             ],
+            tools=[_TRACK_SUGGESTION_TOOL],
+            tool_choice={"type": "function", "function": {"name": "submit_tracks"}},
             temperature=0.7,
             max_completion_tokens=2048,
         )
@@ -1396,17 +1597,11 @@ async def suggest_tracks(
         logger.exception("Track suggestion LLM call failed")
         return CourseError.GENERATION_FAILED
 
-    raw = completion.choices[0].message.content
-    if not raw:
+    args = _extract_tool_args(completion)
+    if args is None:
         return CourseError.GENERATION_FAILED
 
-    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
-    try:
-        cleaned = _strip_markdown_fences(raw)
-        tracks = json.loads(cleaned)
-    except json.JSONDecodeError:
-        return CourseError.INVALID_AI_RESPONSE
-
+    tracks = args.get("tracks", [])
     if not isinstance(tracks, list):
         return CourseError.INVALID_AI_RESPONSE
 
@@ -1474,9 +1669,12 @@ async def generate_weak_area_practice(
 # Lazy generation
 # ---------------------------------------------------------------------------
 
-# Simple in-memory set to prevent duplicate generation requests.
-# In production this would be a Redis key, but for the hackathon this suffices.
+_IMPROVEMENT_SCORE_THRESHOLD = 0.6
+
+# Simple in-memory sets to prevent duplicate generation requests.
+# In production these would be Redis keys, but for the hackathon this suffices.
 _generating_ahead: set[str] = set()
+_improving: set[str] = set()
 
 
 async def _check_and_generate_ahead(
@@ -1505,48 +1703,62 @@ async def _check_and_generate_ahead(
     _generating_ahead.add(course_id)
     try:
         existing_titles = list(all_subtopics)
-        user_msg = (
+        subtopics_user_msg = (
             f"Course topic: {course.name}\n"
             f"Difficulty: {course.difficulty}\n"
             f"Existing subtopics: {json.dumps(existing_titles)}\n\n"
-            f"Generate 3-5 NEW subtopics that continue this course."
+            f"Suggest 3-5 NEW subtopics that continue this course."
         )
 
         try:
-            completion = await ctx.openai.client.chat.completions.create(
+            subtopics_completion = await ctx.openai.client.chat.completions.create(
                 model=settings.OPENAI_MODEL,
                 messages=[
-                    {"role": "system", "content": _CONTINUATION_PROMPT},
-                    {"role": "user", "content": user_msg},
+                    {"role": "system", "content": _SUBTOPICS_SYSTEM_PROMPT},
+                    {"role": "user", "content": subtopics_user_msg},
                 ],
+                tools=[_SUBTOPICS_TOOL],
+                tool_choice={"type": "function", "function": {"name": "submit_subtopics"}},
                 temperature=0.7,
-                max_completion_tokens=8192,
+                max_completion_tokens=512,
             )
         except Exception:
-            logger.exception("Lazy generation LLM call failed")
+            logger.exception("Lazy generation subtopics call failed")
             return
 
-        raw = completion.choices[0].message.content
-        if not raw:
+        subtopics_args = _extract_tool_args(subtopics_completion)
+        if not subtopics_args:
+            logger.warning("Lazy generation: no subtopics tool call returned")
             return
 
-        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
-        try:
-            cleaned = _strip_markdown_fences(raw)
-            data = json.loads(cleaned)
-        except json.JSONDecodeError:
-            logger.exception("Failed to parse lazy generation JSON")
+        new_subtopics: list[str] = subtopics_args.get("subtopics", [])
+        if not new_subtopics:
             return
 
-        new_materials = data.get("materials", {})
+        logger.info(
+            "Lazy generation: new subtopics selected",
+            extra={"course_id": course_id, "new_subtopics": new_subtopics},
+        )
 
-        for mat in materials:
-            if mat.type not in new_materials:
+        # Generate each material type in parallel using the Phase 2 approach
+        existing_types = [mat.type for mat in materials]
+        generation_tasks = [
+            _generate_material_type(ctx, mt, course.name, course.difficulty, new_subtopics, course_id=course_id)
+            for mt in existing_types
+        ]
+        results = await asyncio.gather(*generation_tasks, return_exceptions=True)
+
+        for mat, result in zip(materials, results):
+            if isinstance(result, (Exception, BaseException)) or result is None:
                 continue
-            new_sections_raw = new_materials[mat.type].get("sections", [])
+
+            sections_raw: list[dict] = result.get("sections", [])
+            if mat.type == "fill_in_the_blank":
+                sections_raw = _parse_fill_in_blank_sections(sections_raw)
+
             current_count = len(mat.data)
             new_sections: list[MaterialSectionModel] = []
-            for i, section_raw in enumerate(new_sections_raw):
+            for i, section_raw in enumerate(sections_raw):
                 material_data = _parse_section_material(mat.type, section_raw)
                 if material_data is not None:
                     new_sections.append(
