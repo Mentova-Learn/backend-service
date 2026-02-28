@@ -1,4 +1,5 @@
 aiobotocore == 2.21.1
+exa-py == 2.6.1
 aiofiles == 24.1.0
 bcrypt == 4.3.0
 fastapi == 0.128.0

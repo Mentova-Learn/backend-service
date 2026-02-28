@@ -10,6 +10,7 @@ import {
   IconLoader2,
   IconCheck,
   IconAlertCircle,
+  IconSparkles,
 } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -58,27 +59,46 @@ function CourseCard({ course }: { course: Course }) {
   const diffLabel =
     DIFFICULTY_LABELS[course.difficulty as CourseDifficulty] ??
     course.difficulty;
+  const isGenerating = course.status === "generating";
 
   return (
     <Link
       href={`/courses/${course.id}`}
       style={{ viewTransitionName: `course-card-${course.id}` }}
       className={cn(
-        "flex flex-col gap-1.5 rounded-xl border px-3.5 py-3 w-48 shrink-0",
+        "relative flex flex-col gap-1.5 rounded-xl border px-3.5 py-3 w-48 shrink-0",
         "transition-all duration-200 hover:scale-105 hover:shadow-lg hover:z-10",
-        colorClass,
+        isGenerating ? "bg-muted/60 border-primary/30 border-dashed" : colorClass,
       )}
     >
-      <span className="text-xs font-semibold leading-snug line-clamp-2 text-foreground">
-        {course.name}
-      </span>
-      <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
-        <IconClock className="size-2.5 shrink-0" />
-        <span>{course.estimated_hours}h</span>
-        <span className="mx-0.5">·</span>
-        <span>{topicLabel}</span>
+      <div className="flex items-start justify-between gap-1">
+        <span className={cn(
+          "text-xs font-semibold leading-snug line-clamp-2",
+          isGenerating ? "text-muted-foreground" : "text-foreground",
+        )}>
+          {course.name}
+        </span>
+        {isGenerating && (
+          <IconSparkles className="size-3 text-primary shrink-0 mt-0.5 animate-pulse" />
+        )}
       </div>
-      <div className="text-[10px] text-muted-foreground capitalize">
+      {isGenerating ? (
+        <div className="flex items-center gap-1 text-[10px] text-primary font-medium">
+          <IconLoader2 className="size-2.5 shrink-0 animate-spin" />
+          <span>Generating…</span>
+        </div>
+      ) : (
+        <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+          <IconClock className="size-2.5 shrink-0" />
+          <span>{course.estimated_hours}h</span>
+          <span className="mx-0.5">·</span>
+          <span>{topicLabel}</span>
+        </div>
+      )}
+      <div className={cn(
+        "text-[10px] capitalize",
+        isGenerating ? "text-muted-foreground/60" : "text-muted-foreground",
+      )}>
         {diffLabel}
       </div>
     </Link>
@@ -98,19 +118,34 @@ export default function CoursesPage() {
   >("all");
   const [generationJob, setGenerationJob] = useState<GenerationJob | null>(null);
 
-  useEffect(() => {
-    async function fetchCourses() {
-      try {
-        const data = await api<Course[]>("/api/v1/courses/");
-        setCourses(data);
-      } catch {
-        // Silently handle — empty state shown
-      } finally {
-        setLoading(false);
-      }
+  const fetchCourses = useCallback(async () => {
+    try {
+      const data = await api<Course[]>("/api/v1/courses/");
+      setCourses(data);
+      return data;
+    } catch {
+      return null;
     }
-    fetchCourses();
   }, []);
+
+  useEffect(() => {
+    fetchCourses().finally(() => setLoading(false));
+  }, [fetchCourses]);
+
+  // Poll every 5s when any course is still generating.
+  useEffect(() => {
+    const hasGenerating = courses.some((c) => c.status === "generating");
+    if (!hasGenerating) return;
+
+    const interval = setInterval(async () => {
+      const updated = await fetchCourses();
+      if (updated && !updated.some((c) => c.status === "generating")) {
+        clearInterval(interval);
+      }
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [courses, fetchCourses]);
 
   const handleGenerationStart = useCallback((topic: string) => {
     setGenerationJob({ status: "generating", topic });
@@ -120,8 +155,8 @@ export default function CoursesPage() {
     setGenerationJob((prev) =>
       prev ? { status: "ready", topic: prev.topic, courseId } : null,
     );
-    api<Course[]>("/api/v1/courses/").then(setCourses).catch(() => null);
-  }, []);
+    fetchCourses();
+  }, [fetchCourses]);
 
   const handleGenerationError = useCallback(() => {
     setGenerationJob((prev) =>

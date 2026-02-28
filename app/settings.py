@@ -30,6 +30,9 @@ OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "Qwen/Qwen3-32B")
 
+# Exa configuration (optional — disables web search enrichment if absent)
+EXA_API_KEY = os.environ.get("EXA_API_KEY")
+
 # JWT configuration
 JWT_SECRET_KEY = os.environ["JWT_SECRET_KEY"]
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")

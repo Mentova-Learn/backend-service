@@ -16,10 +16,11 @@ const TYPE_STYLES: Record<string, { bg: string; border: string; icon: typeof Spa
 
 interface SpotlightViewerProps {
   data: SpotlightData;
+  isCompleted?: boolean;
   onComplete?: () => void;
 }
 
-export function SpotlightViewer({ data, onComplete }: SpotlightViewerProps) {
+export function SpotlightViewer({ data, isCompleted, onComplete }: SpotlightViewerProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
 
   const highlights = data.highlights;
@@ -81,7 +82,12 @@ export function SpotlightViewer({ data, onComplete }: SpotlightViewerProps) {
           <ArrowLeft className="h-4 w-4" />
         </Button>
 
-        {isLast && onComplete ? (
+        {isLast && isCompleted ? (
+          <div className="flex items-center gap-2 text-green-600 text-sm font-medium">
+            <CheckCircle className="h-5 w-5" />
+            Got it
+          </div>
+        ) : isLast && onComplete ? (
           <Button size="sm" onClick={onComplete}>
             <CheckCircle className="h-4 w-4" />
             Got it

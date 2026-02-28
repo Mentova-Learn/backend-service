@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import json
+
 from fastapi import APIRouter
 from fastapi import Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.api.v1 import response
 from app.api.v1.context import RequiresAuth
 from app.resources.course import CourseDifficulty
+from app.resources.course import CourseGenerationStatus
 from app.resources.course import CourseMaterialType
 from app.resources.course import CoursePublicity
 from app.resources.course import CourseTopic
@@ -43,6 +48,7 @@ class CourseResponse(BaseModel):
     estimated_hours: int
     tags: list[str]
     publicity: CoursePublicity
+    status: CourseGenerationStatus
     created_at: str
 
 
@@ -65,7 +71,6 @@ class CourseMaterialResponse(BaseModel):
 
 class GenerateCourseResponseData(BaseModel):
     course: CourseResponse
-    materials: list[CourseMaterialResponse]
 
 
 class QuizAnswerRecord(BaseModel):
@@ -140,6 +145,7 @@ class GenerateWeakAreaRequest(BaseModel):
 
 
 type GenerateWrapped = response.BaseResponse[GenerateCourseResponseData]
+type GenerationStatusWrapped = response.BaseResponse[dict]
 type CourseListWrapped = response.BaseResponse[list[CourseResponse]]
 type CourseWrapped = response.BaseResponse[CourseResponse]
 type MaterialListWrapped = response.BaseResponse[list[CourseMaterialResponse]]
@@ -170,6 +176,7 @@ def _course_response(course: courses.CourseModel) -> CourseResponse:
         estimated_hours=course.estimated_hours,
         tags=course.tags,
         publicity=course.publicity,
+        status=course.status,
         created_at=course.created_at.isoformat(),
     )
 
@@ -212,13 +219,42 @@ async def generate_course(
         course_type=body.course_type,
         additional_details=body.additional_details,
     )
-    course, materials = response.unwrap(result)
+    course = response.unwrap(result)
     return response.create(
-        GenerateCourseResponseData(
-            course=_course_response(course),
-            materials=[_material_response(m) for m in materials],
-        ),
+        GenerateCourseResponseData(course=_course_response(course)),
         status=201,
+    )
+
+
+@router.get("/{course_id}/events")
+async def course_generation_events(
+    ctx: RequiresAuth,
+    course_id: str,
+) -> StreamingResponse:
+    async def event_stream():
+        while True:
+            course = await ctx.courses.find_by_id(course_id)
+            if course is None:
+                data = json.dumps({"type": "error", "message": "not_found"})
+                yield f"data: {data}\n\n"
+                return
+
+            data = json.dumps({"type": "status", "status": course.status.value})
+            yield f"data: {data}\n\n"
+
+            if course.status is not CourseGenerationStatus.GENERATING:
+                return
+
+            await asyncio.sleep(3)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

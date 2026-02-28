@@ -12,6 +12,8 @@ import {
   IconChevronRight,
   IconSparkles,
   IconChevronDown,
+  IconBrain,
+  IconAlertTriangle,
 } from "@tabler/icons-react";
 import { Button } from "@/components/ui/button";
 import { FullPageSpinner } from "@/components/ui/spinner";
@@ -33,6 +35,7 @@ export default function CourseViewPage() {
     journey,
     activeStepIndex,
     loading,
+    generationStatus,
     showSpecialisation,
     goNext,
     goPrev,
@@ -165,6 +168,34 @@ export default function CourseViewPage() {
         </div>
       </div>
 
+      {/* ── Generation status banner ── */}
+      {generationStatus === "generating" && (
+        <div className="flex items-center gap-3 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-sm">
+          <div className="relative shrink-0">
+            <IconBrain className="size-5 text-primary" />
+            <span className="absolute -inset-1 rounded-full border border-primary/30 border-t-primary animate-spin" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="font-medium text-foreground">Generating your course materials</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              AI is creating quizzes, flashcards, and exercises in the background. The page will refresh automatically when ready.
+            </p>
+          </div>
+          <IconLoader2 className="size-4 text-primary animate-spin shrink-0" />
+        </div>
+      )}
+      {generationStatus === "failed" && (
+        <div className="flex items-center gap-3 rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm">
+          <IconAlertTriangle className="size-5 text-destructive shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="font-medium text-destructive">Some materials failed to generate</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              The lecture content is still available. You can try extending the course to regenerate materials.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* ── Journey layout ── */}
       {journey && journey.steps.length > 0 ? (
         <div className="flex gap-5 lg:gap-6">
@@ -221,7 +252,7 @@ export default function CourseViewPage() {
             >
               <IconChevronLeft className="size-3.5 shrink-0" />
               <span className="truncate hidden sm:block">
-                {prevStep ? MATERIAL_TYPE_LABELS[prevStep.material_type] : "Start"}
+                {prevStep ? prevStep.subtopic_title : "Start"}
               </span>
             </button>
 
@@ -248,7 +279,7 @@ export default function CourseViewPage() {
               )}
             >
               <span className="truncate hidden sm:block">
-                {nextStep ? MATERIAL_TYPE_LABELS[nextStep.material_type] : "Done"}
+                {nextStep ? nextStep.subtopic_title : "Done"}
               </span>
               <IconChevronRight className="size-3.5 shrink-0" />
             </button>

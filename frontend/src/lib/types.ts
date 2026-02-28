@@ -61,6 +61,8 @@ export type CourseDifficulty = "beginner" | "intermediate" | "advanced" | "exper
 export type CourseTopic = "math" | "science" | "history" | "art" | "music" | "other";
 export type CoursePublicity = "public" | "private";
 
+export type CourseGenerationStatus = "generating" | "ready" | "failed";
+
 export interface Course {
   id: string;
   name: string;
@@ -72,6 +74,7 @@ export interface Course {
   estimated_hours: number;
   tags: string[];
   publicity: CoursePublicity;
+  status: CourseGenerationStatus;
   created_at: string;
 }
 
@@ -262,7 +265,6 @@ export interface GenerateCourseRequest {
 
 export interface GenerateCourseResponse {
   course: Course;
-  materials: CourseMaterial[];
 }
 
 // Quiz score types

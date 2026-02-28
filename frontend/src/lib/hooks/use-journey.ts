@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { api } from "@/lib/api";
 import type {
   Course,
   CourseMaterial,
+  CourseGenerationStatus,
   JourneyStep,
   JourneyView,
 } from "@/lib/types";
@@ -15,6 +16,7 @@ export interface UseJourneyReturn {
   journey: JourneyView | null;
   activeStepIndex: number;
   loading: boolean;
+  generationStatus: CourseGenerationStatus | null;
   completionPct: number;
   showSpecialisation: boolean;
   goNext: () => void;
@@ -37,10 +39,13 @@ export function useJourney(courseId: string): UseJourneyReturn {
   const [activeStepIndex, setActiveStepIndex] = useState(0);
   const [loading, setLoading] = useState(true);
   const [initialised, setInitialised] = useState(false);
+  const [generationStatus, setGenerationStatus] = useState<CourseGenerationStatus | null>(null);
 
   // Extension state
   const [extensionPrompt, setExtensionPrompt] = useState("");
   const [extending, setExtending] = useState(false);
+
+  const sseRef = useRef<EventSource | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -52,6 +57,7 @@ export function useJourney(courseId: string): UseJourneyReturn {
       setCourse(courseData);
       setMaterials(materialsData);
       setJourney(journeyData);
+      setGenerationStatus(courseData.status);
 
       // Auto-navigate to recommended step on initial load
       if (!initialised && journeyData.recommended_step_index !== null) {
@@ -70,6 +76,54 @@ export function useJourney(courseId: string): UseJourneyReturn {
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // Connect SSE when course is generating to auto-refresh on completion.
+  useEffect(() => {
+    if (generationStatus !== "generating") {
+      sseRef.current?.close();
+      sseRef.current = null;
+      return;
+    }
+    if (sseRef.current) return;
+
+    const token = typeof window !== "undefined"
+      ? localStorage.getItem("token")
+      : null;
+    const base = process.env.NEXT_PUBLIC_API_URL || "http://localhost:80";
+    const url = token
+      ? `${base}/api/v1/courses/${courseId}/events?token=${encodeURIComponent(token)}`
+      : `${base}/api/v1/courses/${courseId}/events`;
+
+    const es = new EventSource(url);
+    sseRef.current = es;
+
+    es.onmessage = (evt) => {
+      try {
+        const payload = JSON.parse(evt.data) as { type: string; status?: CourseGenerationStatus };
+        if (payload.type === "status" && payload.status) {
+          setGenerationStatus(payload.status);
+          if (payload.status !== "generating") {
+            es.close();
+            sseRef.current = null;
+            // Refresh the full journey data when generation is done.
+            fetchData();
+          }
+        }
+      } catch {
+        // Ignore parse errors
+      }
+    };
+
+    es.onerror = () => {
+      es.close();
+      sseRef.current = null;
+    };
+
+    return () => {
+      es.close();
+      sseRef.current = null;
+    };
+  }, [courseId, generationStatus, fetchData]);
 
   const refreshJourney = useCallback(async () => {
     try {
@@ -153,6 +207,7 @@ export function useJourney(courseId: string): UseJourneyReturn {
     journey,
     activeStepIndex,
     loading,
+    generationStatus,
     completionPct,
     showSpecialisation,
     goNext,

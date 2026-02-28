@@ -5,6 +5,7 @@ from . import quiz_scores
 from . import user
 from .course import CourseAssignModel
 from .course import CourseAssignRepository
+from .course import CourseGenerationStatus
 from .course import CourseMaterialModel
 from .course import CourseMaterialRepository
 from .course import CourseModel

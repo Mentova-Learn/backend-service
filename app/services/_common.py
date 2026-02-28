@@ -10,6 +10,7 @@ from typing import TypeIs
 from fastapi import status
 
 from app.adapters.aws import AWSSessionAdapter
+from app.adapters.exa import ExaClientAdapter
 from app.adapters.mongodb import ImplementsMongoDB
 from app.adapters.openai import OpenAIClientAdapter
 from app.adapters.redis import RedisClient
@@ -80,6 +81,10 @@ class AbstractContext(ABC):
 
     @property
     @abstractmethod
+    def _exa(self) -> ExaClientAdapter | None: ...
+
+    @property
+    @abstractmethod
     def _storage(self) -> StorageAdapter: ...
 
     @property
@@ -89,6 +94,10 @@ class AbstractContext(ABC):
     @property
     def openai(self) -> OpenAIClientAdapter:
         return self._openai
+
+    @property
+    def exa(self) -> ExaClientAdapter | None:
+        return self._exa
 
     @property
     def storage(self) -> StorageAdapter:

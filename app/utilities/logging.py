@@ -217,7 +217,7 @@ class _ContextLoggingWrapper:
         self,
         extra: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
-        params = get_current_context()
+        params = dict(get_current_context())
         if extra is not None:
             params |= dict(extra)
 

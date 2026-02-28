@@ -313,7 +313,7 @@ export function QuizViewer({ sections, courseId, materialId, onComplete }: QuizV
           Question {currentIndex + 1} of {questions.length}
         </span>
         <span className="font-medium text-primary">
-          Score: {sectionScore}/{currentIndex + (answered ? 1 : 0)}
+          Score: {sectionScore}/{questions.length}
         </span>
       </div>
       <div className="w-full h-1 bg-gray-100 rounded-full overflow-hidden">
