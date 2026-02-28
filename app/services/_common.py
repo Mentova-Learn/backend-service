@@ -10,7 +10,6 @@ from typing import TypeIs
 from fastapi import status
 
 from app.adapters.aws import AWSSessionAdapter
-from app.adapters.minimax import MiniMaxAdapter
 from app.adapters.mysql import ImplementsMySQL
 from app.adapters.redis import RedisClient
 from app.resources import UserModel
@@ -70,16 +69,8 @@ class AbstractContext(ABC):
     def _aws(self) -> AWSSessionAdapter: ...
 
     @property
-    @abstractmethod
-    def _minimax(self) -> MiniMaxAdapter: ...
-
-    @property
     def aws(self) -> AWSSessionAdapter:
         return self._aws
-
-    @property
-    def minimax(self) -> MiniMaxAdapter:
-        return self._minimax
 
     @property
     def users(self) -> UserRepository:

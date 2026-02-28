@@ -34,18 +34,11 @@ services:
       - MYSQL_TCP_PORT=3306
       - MYSQL_HOST=mysql
       - APP_COMPONENT=fastapi
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_DATABASE=0
-      - MINIMAX_API_KEY=${MINIMAX_API_KEY:-}
-      - MINIMAX_GROUP_ID=${MINIMAX_GROUP_ID:-}
-      - AWS_REGION=${AWS_REGION:-us-east-1}
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
     env_file:
       - ./configuration/app.env
+      - ./configuration/aws.env
       - ./configuration/mysql.env
+      - ./configuration/redis.env
     depends_on:
       mysql:
         condition: service_healthy

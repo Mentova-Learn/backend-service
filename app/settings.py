@@ -20,10 +20,6 @@ REDIS_HOST = os.environ["REDIS_HOST"]  # Non-standard
 REDIS_PORT = int(os.environ["REDIS_PORT"])  # Non-standard
 REDIS_DATABASE = int(os.environ["REDIS_DATABASE"])  # Non-standard
 
-# MiniMax configuration
-MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
-MINIMAX_GROUP_ID = os.environ.get("MINIMAX_GROUP_ID", "")
-
 # AWS configuration
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID")

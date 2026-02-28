@@ -12,7 +12,6 @@ from starlette.responses import Response
 
 from app import settings
 from app.adapters import aws
-from app.adapters import minimax
 from app.adapters import mysql
 from app.adapters import redis
 from app.utilities import logging
@@ -28,7 +27,6 @@ def create_app() -> FastAPI:
 
     initialise_cors(app)
     initialise_aws(app)
-    initialise_minimax(app)
     initialise_mysql(app)
     initialise_redis(app)
     initialise_request_tracing(app)
@@ -61,11 +59,6 @@ def initialise_cors(app: FastAPI) -> None:
 def initialise_aws(app: FastAPI) -> None:
     app.state.aws = aws.default()
     logger.debug("Attached AWS to the app instance.")
-
-
-def initialise_minimax(app: FastAPI) -> None:
-    app.state.minimax = minimax.default()
-    logger.debug("Attached MiniMax to the app instance.")
 
 
 def create_routes(app: FastAPI) -> None:

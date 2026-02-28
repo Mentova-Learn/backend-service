@@ -18,9 +18,10 @@ from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi import status
+from fastapi.security import HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer
 
 from app.adapters.aws import AWSSessionAdapter
-from app.adapters.minimax import MiniMaxAdapter
 from app.adapters.mysql import ImplementsMySQL
 from app.adapters.mysql import MySQLPoolAdapter
 from app.adapters.redis import RedisClient
@@ -52,11 +53,6 @@ class HTTPContext(AbstractContext):
     def _aws(self) -> AWSSessionAdapter:
         return self.request.app.state.aws
 
-    @property
-    @override
-    def _minimax(self) -> MiniMaxAdapter:
-        return self.request.app.state.minimax
-
 
 class HTTPTransactionContext(AbstractContext):
     """Context for write operations using an explicit transaction."""
@@ -66,12 +62,10 @@ class HTTPTransactionContext(AbstractContext):
         mysql: ImplementsMySQL,
         redis: RedisClient,
         aws: AWSSessionAdapter,
-        minimax: MiniMaxAdapter,
     ) -> None:
         self._mysql_conn = mysql
         self._redis_conn = redis
         self._aws_session = aws
-        self._minimax_client = minimax
 
     @property
     @override
@@ -88,11 +82,6 @@ class HTTPTransactionContext(AbstractContext):
     def _aws(self) -> AWSSessionAdapter:
         return self._aws_session
 
-    @property
-    @override
-    def _minimax(self) -> MiniMaxAdapter:
-        return self._minimax_client
-
 
 async def _get_transaction_context(
     request: Request,
@@ -101,14 +90,12 @@ async def _get_transaction_context(
     pool: MySQLPoolAdapter = request.app.state.mysql
     redis_client: RedisClient = request.app.state.redis
     aws_session: AWSSessionAdapter = request.app.state.aws
-    minimax_client: MiniMaxAdapter = request.app.state.minimax
 
     async with pool.transaction() as transaction:
         yield HTTPTransactionContext(
             transaction,
             redis_client,
             aws_session,
-            minimax_client,
         )
 
 
@@ -133,10 +120,9 @@ class HTTPAuthTransactionContext(HTTPTransactionContext, AbstractAuthContext):
         mysql: ImplementsMySQL,
         redis: RedisClient,
         aws: AWSSessionAdapter,
-        minimax: MiniMaxAdapter,
         user: UserModel,
     ) -> None:
-        super().__init__(mysql, redis, aws, minimax)
+        super().__init__(mysql, redis, aws)
         self._user_model = user
 
     @property
@@ -145,16 +131,20 @@ class HTTPAuthTransactionContext(HTTPTransactionContext, AbstractAuthContext):
         return self._user_model
 
 
-async def _get_authenticated_user(request: Request) -> UserModel:
-    auth_header: str | None = request.headers.get("Authorization")
-    if auth_header is None or not auth_header.startswith("Bearer "):
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+async def _get_authenticated_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> UserModel:
+    if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing or invalid authorization header",
         )
 
-    token = auth_header[7:]
-    user_id = tokens.decode_access_token(token)
+    user_id = tokens.decode_access_token(credentials.credentials)
     if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -187,14 +177,12 @@ async def _get_auth_transaction_context(
     pool: MySQLPoolAdapter = request.app.state.mysql
     redis_client: RedisClient = request.app.state.redis
     aws_session: AWSSessionAdapter = request.app.state.aws
-    minimax_client: MiniMaxAdapter = request.app.state.minimax
 
     async with pool.transaction() as transaction:
         yield HTTPAuthTransactionContext(
             transaction,
             redis_client,
             aws_session,
-            minimax_client,
             user,
         )
 
